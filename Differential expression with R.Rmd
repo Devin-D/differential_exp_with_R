@@ -1,0 +1,224 @@
+---
+title: "Differential Expression with R"
+author: "Devin Dinwiddie"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  html_document: default
+  word_document: default
+---
+
+
+```{r,echo=TRUE}
+read_totals=read.table("A7reads.tsv",header = F) # import read total into data frame
+read_totals$V1= substring(read_totals$V1,1,5) # clean up file name remove .fq.gz
+colnames(read_totals)=c("file name","total reads") # rename the columns
+
+counts=read.delim("Gacu_gut_counts.tsv",row.names = 1,stringsAsFactors = F) # read gene counts data in df
+countsum=data.frame(apply(counts,2,sum)) # sum the gene counts data across files ie columns (2)
+colnames(countsum)="sumOfExonReadCounts" # rename the columns for clarity
+
+#determine the percentage of reads that mapped to exons
+countProp=data.frame(read_totals$`file name`,(countsum$sumOfExonReadCounts/read_totals$`total reads`)*100)
+colnames(countProp)=c("file name","percent mapping to exon") # rename the columns for clarity
+head(countProp)
+```
+
+```{r,echo=TRUE}
+#plot 1A_02 vs 1A_03 to compare read lengths
+plot(counts$X1A_02,counts$X1A_03,xlab= "1A_02 counts",ylab="1A_03 counts",axes=F,col="darkgreen",col.lab="black",main="Gene count comparison",col.main='blue',sub="Figure 1",cex=1,pch=21,bg="thistle",ylim = c(0,150000))
+axis(1,pos=0)
+axis(2,pos=0)
+abline(0,1,col='red',lwd=3)
+```
+
+ 
+```{r,echo=TRUE}
+library(edgeR) # load the edge r library
+dge = DGEList(counts=counts) #store raw counts in a dgelist
+dge = calcNormFactors(dge) # calculate tmm normalization factors
+TMMCPM = as.data.frame(cpm(dge,normalized.lib.sizes=TRUE)) #Apply the TMM normalization factors and adjust for library size by converting to copies per million (cpm)
+
+#plot normalized gene count data same samples as previous plot
+plot(TMMCPM$X1A_02,TMMCPM$X1A_03,xlab= "1A_02 counts",ylab="1A_03 counts",axes=F,col="darkgreen",col.lab="black",main="TMM Normalized Gene Count comparison",col.main='blue',sub="Figure 1",cex=1,pch=21,bg="thistle",ylim = c(0,15000))
+axis(1,pos=0)
+axis(2,pos=0)
+abline(0,1,col='red',lwd=3)
+```
+
+
+```{r,echo=TRUE}
+dge.er = DGEList(counts=counts) #new dge list
+keep.dge.er = rowSums(cpm(dge.er)>=1) >= 8 # only keep genes seen at least 2 cpm in at least 8 sampls
+dge.er = dge.er[keep.dge.er,] #update dge list with low level genes factored out
+
+#how many genes are we dealing with now
+nrow(dge.er)
+
+dge.er = calcNormFactors(dge.er) #calculate TMM normalizaton factor
+
+Targets.er=read.delim("Gacu_gut_metadata.tsv") #read in the meta data
+
+PopTrt = paste(Targets.er$Population,Targets.er$Treatment, sep=".") #combine pop and treatment for contrasts
+PopTrt
+
+design.er = model.matrix(~0 + PopTrt) #set up the design error
+design.er
+colnames(design.er)
+
+#estimate dispersion parameter for modleing
+dge.er = estimateGLMCommonDisp(dge.er, design.er) #serial estimate common dispersion
+dge.er = estimateGLMTrendedDisp(dge.er, design.er) #estimate trended dispersion
+dge.er = estimateGLMTagwiseDisp(dge.er, design.er) #estimate tagwise dispersion
+fit.er = glmFit(dge.er, design.er)# fit generalized linear model with dispersion estimates
+
+lrtPop = glmLRT(fit.er, contrast=c(-.5,-.5,.5,.5)) #test pop effect contrast the average across sample groups
+topTags(lrtPop) #genes with lowest corrected p values
+write.table(topTags(lrtPop, n=16877), 'edgeR_PopLRT.txt',sep='\t') #write test results to outfile 
+de.er = decideTestsDGE(lrtPop, p=0.05) 
+summary(de.er)#summary of genes differentially expressed by pop
+detags.er = rownames(fit.er)[as.logical(de.er)]
+#plot in a smearplot
+plotSmear(lrtPop, de.tags=detags.er)
+abline(h = c(-2, 2), col = "blue")
+```
+
+
+
+```{r,echo=TRUE}
+# perform the same calculations for treatment
+#to test for the treatment (microbiota) effects we contrast the #average of Bt.CV and RS.CV the average of Bt.GF and RS.GF
+lrtTrt = glmLRT(fit.er, contrast=c(-.5,.5,-.5,.5))
+topTags(lrtTrt) #look for genes with lowest FDR corrected Pval
+write.table(topTags(lrtTrt, n=16877), 'edgeR_TrtLRT.txt',sep='\t') #write to a table
+de.er = decideTestsDGE(lrtTrt, p=0.05)
+summary(de.er) #sumarize the differential exppression by treat
+
+#create a smear plot for the treatment comparison
+plotSmear(lrtTrt,de.tags=detags.er,yaxt='n',ylim=c(-8,8))
+axis(1)
+axis(2,at=c(-5,0,5),labels = c(-5,0,5))
+abline(h = c(-2, 2), col = "blue")
+```
+
+```
+The treatment comparison smear plot has the differentially expressed genes (red) aligning around 0, The two plots together indicate a much higher frequency of DE genes  amongst the stickleback populations and not a high frequency of DE genes in the different microbiota treatments.
+
+```
+
+```{r,echo=TRUE}
+#Testing effects of Population and Treatment on differential expression 
+#using the general linear model approach in limma (with voom())
+dge.lv <- DGEList(counts=counts) #new dge list
+
+keep.dge.lv = rowSums(cpm(dge.er)>=1) >= 8 # only keep genes seen at least 2 cpm in at least 8 sampls
+dge.lv = dge.lv[keep.dge.lv,] #update dge list with low level genes factored out
+
+#how many genes are we dealing with now
+nrow(dge.lv)
+
+dge.lv = calcNormFactors(dge.lv) #calculate TMM normalizaton factor
+
+Targets.lv=read.delim("Gacu_gut_metadata.tsv") #read in the meta data
+
+PopTrt.lv = paste(Targets.lv$Population,Targets.lv$Treatment, sep=".") #combine pop and treatment for contrasts
+PopTrt.lv
+
+design.lv = model.matrix(~0 + PopTrt) #set up the design error
+design.lv
+colnames(design.lv) #print column nams
+
+#use voom to generate precision weights
+v.lv = voom(dge.lv, design.lv)
+#fit the full general linear model, which includes the voom() precision weights
+fit.lv = lmFit(v.lv, design.lv)
+
+#compute contrasts from linear model fit
+fit.lv.Pop = contrasts.fit(fit.lv,contrast=c(-.5,-.5,.5,.5))
+#Ebayes statistics for Differential Expression 
+fit.lv.Pop=eBayes(fit.lv.Pop)
+#look at all the genes with the lowest FDR-corrected p-values
+topTable(fit.lv.Pop)
+#write results to  a table
+write.table(topTable(fit.lv.Pop, n=16877),'limma_PopLRT.txt', sep='\t')
+
+#summarize how many genes are differentially expressed by Populaton 
+#using an FDR = 0.05. 
+subsetPop <- subset(topTable(fit.lv.Pop, n=16877), topTable(fit.lv.Pop, n=16877)[,5] <= 0.05)
+
+```
+
+```{r,echo=TRUE}
+#Treatment Contrast 
+fit.lv.Trt = contrasts.fit(fit.lv,contrast=c(-.5,.5,-.5,.5))
+fit.lv.Trt = eBayes(fit.lv.Trt)
+#To look at the genes with the lowest FDR-corrected p-values:
+topTable(fit.lv.Trt)
+#And to write all of the test results to file
+write.table(topTable(fit.lv.Trt, n=16877),'limma_TrtLRT.txt', sep='\t')
+
+#Summarize how many genes are differentiall expressed by treatment,
+#using an FDR = 0.05 and subset and parse topTable. 
+#subsetTrt <- subset(topTable(fit.lv.Trt, n=16877),topTable(fit.lv.Trt, n=16877)[,5] <= 0.05)
+subsetTrt <- subset(topTable(fit.lv.Trt, n=16877), subset = adj.P.Val <= 0.05)
+```
+
+```{r,echo=TRUE}
+#Compare the overlap in differentially expressed genes between 
+#edgeR and limma-voom
+
+# #create a variable to hold the topTags objects.
+topLrtPop<- topTags(lrtPop, n=16877)
+topLrtTrt <- topTags(lrtTrt, n=16877)
+#Create a subset of the topTags for those genes with FDR <= 0.05
+subsetLRTpop <- subset(topLrtPop$table, topLrtPop$table$FDR <= 0.05) 
+
+#check that the subset worked 
+head(subsetLRTpop)
+max(subsetLRTpop$FDR)
+
+#subset the topTag object to those genes with FDR <= 0.05
+subsetLrtTrt = subset(topLrtTrt$table, subset = topLrtTrt$table$FDR <= 0.05)
+
+#Load the library 
+library(VennDiagram)
+
+#Make a Venn Diagram to show overlap between EdgeR and Limma approaches.
+#Show overlap of significant genes (FDR = 0.05)
+
+#Variables to use Limma:
+#subsetPop, subsetTrt 
+namesLVpop = rownames(subsetPop)
+namesLVtrt = rownames(subsetTrt) 
+
+#Variable to use EdgeR:
+#subsetLRTpop, subsetLrtTrt
+namesLrtPop = rownames(subsetLRTpop)
+namesLrtTrt = rownames(subsetLrtTrt)
+
+
+#Characterize the population test.
+#find the set of signif Diff Expressed genes that overlaps between edgeR and limmaVoom approaches
+vennPop = venn.diagram(
+  list(Limma = namesLVpop, EdgeR = namesLrtPop), 
+  filename = NULL, fill = c("dodgerblue3", "magenta4"), 
+  main = "Comparison of Differentially Expressed Genes \n Identified Between Populations" )
+
+# to get venn di to paste in RMD knit filename=Null above and code below
+grid.newpage()
+grid.draw(vennPop)
+
+#Characterize the treatment test. 
+#find the set of significant DE genes between EdgeR and Limma
+
+vennTrt = venn.diagram(list(Limma = namesLVtrt, EdgeR = namesLrtTrt),
+                        filename = NULL, fill = c("dodgerblue3", "magenta4"),
+                        main = "Comparison of Differentially Expressed Genes \n Identified Between Treatments")
+
+grid.newpage()
+grid.draw(vennTrt)
+```
+
+```
+In the limma-voom approach for treatment comparison 0 DE genes were found while the Edge approach found few (49) no overlap between the two approches for treatment comparison. population comparison found a lot more overlap between the two approches  both approaches seem to have found unique DE genes not identified in by other method but the majority of DE genes identified are in the overlap between the two approaches. a lot more DE genes were identifies between populations compared to treatment.
+
+```
